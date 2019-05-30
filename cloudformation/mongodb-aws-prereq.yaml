@@ -175,7 +175,13 @@ Resources:
         InstanceInitiatedShutdownBehavior: stop
         DisableApiTermination: false
         BlockDeviceMappings:
-          - Ebs:
+          - DeviceName: "/dev/sdf"
+            Ebs:
+              DeleteOnTermination: true
+              # Change to false when testing is complete. Why?
+              # InstanceInitiatedShutdownBehavior: stop preserves the
+              # volume during a spot interruption, but not during an
+              # AWS scheduled maintenance event or an instance failure.
               VolumeType: gp2
               VolumeSize: !Ref DiskSizeData
               DeleteOnTermination: true
@@ -185,7 +191,6 @@ Resources:
               # create a customer-managed KMS key, and refer to it by ID.
               # Omitted from this sample template because keys cost money
               # and cannot readily be deleted.
-            DeviceName: "/dev/sdf"
         ImageId: !Ref ImageId
         UserData: !Base64
           "Fn::Join":
