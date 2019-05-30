@@ -1,0 +1,244 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: "MongoDB on AWS EC2 prerequisites, for Percona Live Conference. Copyright Paul Marcelin, 2019"
+
+Parameters:
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: "Identifier of the Virtual Private Cloud in which to launch MongoDB server instances. In general, choose your default VPC."
+  VpcKeyword:
+    Type: String
+    Description: "Text keyword to identify chosen VPC"
+    Default: "defaultvpc"
+
+  VpcSubnet1Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: "Identifier of a subnet in which MongoDB server instances may be launched"
+  VpcSubnet2Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: "Identifier of a different subnet in which instances may be launched"
+  VpcSubnet3Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: "Identifier of another subnet. Repeat a subnet if the region only supports two availability zones."
+
+  DbPort:
+    Type: Number
+    Description: "TCP port for MongoDB traffic"
+    Default: "27017"
+
+  DiskSizeData:
+    Type: Number
+    Description: "Size of MongoDB server data volume, in gigabytes"
+    Default: 100
+
+  ImageId:
+    Type: AWS::EC2::Image::Id
+    Description: "Identifier of the Amazon Machine Image (AMI) for the MongoDB server instances. The default points to Ubuntu 18.04 LTS, in region us-east-1, as of 2019-05-29, but see https://console.aws.amazon.com/ec2/v2/home#LaunchInstanceWizard and choose a local, current, AWS-supplied AMI with Systems Manager support."
+    Default: "ami-0a313d6098716f372"
+
+  GroupTagKey:
+    Type: String
+    Description: "Name of a tag to be applied to all resources"
+    Default: "Application"
+  GroupTagValue:
+    Type: String
+    Description: "Value of the tag"
+    Default: "mongodb-example"
+
+Metadata:
+
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Virtual Private Cloud"
+        Parameters:
+          - VpcId
+          - VpcKeyword
+      - Label:
+          default: "Subnets (Must be in chosen VPC)"
+        Parameters:
+          - VpcSubnet1Id
+          - VpcSubnet2Id
+          - VpcSubnet3Id
+      - Label:
+          default: "Miscellaneous Properties"
+        Parameters:
+          - DbPort
+          - DiskSizeData
+          - ImageId
+      - Label:
+          default: "Tagging"
+        Parameters:
+          - GroupTagKey
+          - GroupTagValue
+
+Resources:
+
+  AllOutSecGrp:
+    Type: AWS::EC2::SecurityGroup
+    DeletionPolicy: Delete
+    Properties:
+      GroupDescription: "All resources all outbound"
+      VpcId: !Ref VpcId
+      Tags:
+        - { Key: !Ref GroupTagKey, Value: !Ref GroupTagValue }
+        - { Key: Name, Value: !Sub "${VpcKeyword}-all-out" }
+        - { Key: Scope, Value: all }
+        - { Key: Service, Value: all }
+
+  MongoDbClientSecGrp:
+    Type: AWS::EC2::SecurityGroup
+    DeletionPolicy: Delete
+    Properties:
+      GroupDescription: "MongoDB client"
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - # Dummy (prevents CloudFormation from automatically creating a rule allowing all outbound traffic)
+          IpProtocol: "-1"  # All traffic
+          CidrIp: "127.0.0.1/32"  # Loopback interface
+      Tags:
+        - { Key: !Ref GroupTagKey, Value: !Ref GroupTagValue }
+        - { Key: Name, Value: !Sub "${VpcKeyword}-mongodb-client" }
+        - { Key: Scope, Value: client }
+        - { Key: Service, Value: mongodb }
+
+  MongoDbServerSecGrp:
+    Type: AWS::EC2::SecurityGroup
+    DeletionPolicy: Delete
+    Properties:
+      GroupDescription: "MongoDB server"
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"  # All traffic
+          CidrIp: "127.0.0.1/32"  # Loopback interface
+          Description: "Dummy to prevent CloudFormation from adding a default outbound rule for all traffic"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref DbPort
+          ToPort: !Ref DbPort
+          SourceSecurityGroupId: !Ref MongoDbClientSecGrp
+          Description: "Replication traffic"
+        - IpProtocol: tcp
+          FromPort: !Ref DbPort
+          ToPort: !Ref DbPort
+          SourceSecurityGroupId: !Ref MongoDbClientSecGrp
+          Description: "Application traffic"
+      Tags:
+        - { Key: !Ref GroupTagKey, Value: !Ref GroupTagValue }
+        - { Key: Name, Value: !Sub "${VpcKeyword}-mongodb-server" }
+        - { Key: Scope, Value: server }
+        - { Key: Service, Value: mongodb }
+
+  MongoDbServerRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Delete
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM"
+          # Write a more restrictive user-managed policy. This AWS-managed one
+          # includes "s3:GetObject" on "*", and other unnecessary permissions.
+
+  MongoDbServerProfile:
+    Type: AWS::IAM::InstanceProfile
+    DeletionPolicy: Delete
+    Properties:
+      Roles:
+        - !Ref MongoDbServerRole
+
+  MongoDbServerLaunchTempl:
+    Type: AWS::EC2::LaunchTemplate
+    DeletionPolicy: Delete
+    Properties:
+      LaunchTemplateData:
+        InstanceType: "t3.medium"  # Minimum reasonable size
+        CreditSpecification:
+          CpuCredits: standard  # For t2, t3 instance type only
+        EbsOptimized: true
+        IamInstanceProfile:
+          Name: !Ref MongoDbServerProfile
+        SecurityGroupIds:
+          - !Ref AllOutSecGrp
+          - !Ref MongoDbServerSecGrp
+        # KeyName: String
+        # Not used. AWS Systems Manager Session Manger provides shell access.
+        InstanceInitiatedShutdownBehavior: stop
+        DisableApiTermination: false
+        BlockDeviceMappings:
+          - Ebs:
+              VolumeType: gp2
+              VolumeSize: !Ref DiskSizeData
+              DeleteOnTermination: true
+              Encrypted: true
+              # KmsKeyId: String
+              # Instead of relying on your AWS-managed service key for EC2,
+              # create a customer-managed KMS key, and refer to it by ID.
+              # Omitted from this sample template because keys cost money
+              # and cannot readily be deleted.
+            DeviceName: "/dev/sdf"
+        ImageId: !Ref ImageId
+        UserData: !Base64
+          "Fn::Join":
+            - ""
+            - - "#cloud-config\n"
+              - "repo_update: true\n"
+              - "repo_upgrade: all\n"
+              - "\n"
+              - "packages:\n"
+              - "  - mongodb\n"
+          # Placeholder only. Use more elaborate cloud-init input, a custom
+          # script, or preferably, AWS Systems Manager, AWS OpsWorks, or
+          # the configuration management system of your choice, to:
+          # 1. Mount the data volume
+          # 2. Install the latest version of MongoDB
+          # 3. Obtain a TLS certificate
+          # 4. Configure MongoDB server
+          # 5. Start MongoDB server
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: !Ref GroupTagKey, Value: !Ref GroupTagValue }
+          - ResourceType: volume
+            Tags:
+              - { Key: !Ref GroupTagKey, Value: !Ref GroupTagValue }
+
+  MongoDbServerEc2Fleet:
+    Type: AWS::EC2::EC2Fleet
+    DeletionPolicy: Delete
+    Properties:
+      LaunchTemplateConfigs:
+        - LaunchTemplateSpecification:
+            LaunchTemplateId: !Ref MongoDbServerLaunchTempl
+            Version: 1
+          Overrides:
+            - WeightedCapacity: 1  # instance(s)
+              SubnetId: !Ref VpcSubnet1Id
+            - WeightedCapacity: 1  # instance(s)
+              SubnetId: !Ref VpcSubnet2Id
+            - WeightedCapacity: 1  # instance(s)
+              SubnetId: !Ref VpcSubnet3Id
+      TargetCapacitySpecification:
+        TotalTargetCapacity: 3     # instances
+        SpotTargetCapacity: 3      # instances
+        DefaultTargetCapacityType: spot
+        OnDemandTargetCapacity: 0
+      Type: maintain
+      SpotOptions:
+        AllocationStrategy: diversified
+        InstanceInterruptionBehavior: stop
+      ReplaceUnhealthyInstances: false
+      ExcessCapacityTerminationPolicy: "no-termination"
+      TagSpecifications:
+        - ResourceType: fleet
+          Tags:
+            - { Key: !Ref GroupTagKey, Value: !Ref GroupTagValue }
